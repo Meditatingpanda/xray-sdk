@@ -1,0 +1,16 @@
+{
+  "name": "xray-sys-monorepo",
+  "version": "1.0.0",
+  "description": "Monorepo for xray-sys containing sdk and api packages",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
