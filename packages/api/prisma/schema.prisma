@@ -1,0 +1,116 @@
+generator client {
+    provider = "prisma-client-js"
+}
+
+datasource db {
+    provider = "postgresql"
+}
+
+model Run {
+    id              String  @id @default(uuid())
+    traceId         String
+    pipeline        String
+    pipelineVersion String?
+    status          String  @default("running") // running|success|error
+
+    startedAt  DateTime  @default(now())
+    endedAt    DateTime?
+    durationMs Int?
+
+    input  Json?
+    output Json?
+    error  Json?
+
+    tags Json @default("{}")
+    meta Json @default("{}")
+
+    steps Step[]
+
+    @@index([pipeline, startedAt(sort: Desc)])
+    @@index([traceId])
+}
+
+model Step {
+    id    String @id @default(uuid())
+    runId String
+    run   Run    @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+    parentStepId String?
+    parentStep   Step?   @relation("StepParent", fields: [parentStepId], references: [id], onDelete: SetNull)
+    children     Step[]  @relation("StepParent")
+
+    name   String
+    type   String
+    status String @default("running") // running|success|error
+
+    startedAt  DateTime  @default(now())
+    endedAt    DateTime?
+    durationMs Int?
+
+    input         Json?
+    output        Json?
+    reasoning     Json?
+    meta          Json  @default("{}")
+    capturePolicy Json  @default("{}")
+
+    candidates StepCandidate[]
+    outcomes   CandidateOutcome[]
+    metrics    StepMetrics?
+
+    @@index([runId])
+    @@index([name])
+    @@index([type])
+}
+
+model StepCandidate {
+    id     String @id @default(uuid())
+    stepId String
+    step   Step   @relation(fields: [stepId], references: [id], onDelete: Cascade)
+
+    candidateId   String
+    candidateType String
+    rank          Int?
+    score         Float?
+    payload       Json?
+    meta          Json   @default("{}")
+
+    @@unique([stepId, candidateId, candidateType])
+    @@index([stepId])
+    @@index([stepId, rank])
+}
+
+model CandidateOutcome {
+    id     String @id @default(uuid())
+    stepId String
+    step   Step   @relation(fields: [stepId], references: [id], onDelete: Cascade)
+
+    candidateId   String
+    candidateType String
+
+    outcome       String // accepted|rejected|selected
+    reasonCode    String?
+    reasonDetail  Json?
+    reasoningText String?
+
+    createdAt DateTime @default(now())
+
+    @@unique([stepId, candidateId, candidateType, outcome])
+    @@index([stepId])
+    @@index([stepId, reasonCode])
+}
+
+model StepMetrics {
+    stepId String @id
+    step   Step   @relation(fields: [stepId], references: [id], onDelete: Cascade)
+
+    candidatesIn       Int   @default(0)
+    candidatesCaptured Int   @default(0)
+    acceptedCount      Int   @default(0)
+    rejectedCount      Int   @default(0)
+    selectedCount      Int   @default(0)
+    rejectionRate      Float @default(0)
+
+    meta Json @default("{}")
+
+    @@index([rejectionRate])
+}
