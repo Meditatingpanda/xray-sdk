@@ -14,6 +14,7 @@ Unlike generic APM tools (Datadog, New Relic) which focus on CPU/Memory/Requests
 The system is built as a **Monorepo** containing a TypeScript SDK for instrumentation and a centralized API service for data ingestion and storage.
 
 ---
+<img width="786" height="601" alt="Screenshot 2026-01-02 at 11 28 59 PM" src="https://github.com/user-attachments/assets/475867c6-f16b-4b16-8ac0-cc6dbf7e0bed" />
 
 ## 2. High-Level System Design
 
