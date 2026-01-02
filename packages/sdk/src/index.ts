@@ -16,7 +16,6 @@ export class XRay {
     startRun(run: RunStart) {
         const runId = uuid();
         const now = new Date().toISOString();
-
         this.client.enqueue("/v1/runs", {
             runId,
             traceId: run.traceId,
@@ -31,6 +30,13 @@ export class XRay {
 
         const runHandle = new XRayRun(this.client, runId, run.traceId);
         return runHandle;
+    }
+    async flush() {
+        await this.client.flush();
+    }
+
+    shutdown() {
+        this.client.shutdown();
     }
 }
 

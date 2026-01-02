@@ -148,6 +148,7 @@ async function main() {
         await s4.endSuccess();
 
         run.endSuccess({ competitorAsin: top.asin });
+        await xray.flush();
     });
 }
 
