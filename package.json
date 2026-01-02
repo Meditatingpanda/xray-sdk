@@ -8,6 +8,7 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces",
+    "dev:api": "cd packages/api && npm run dev",
     "test": "npm run test --workspaces"
   },
   "keywords": [],
