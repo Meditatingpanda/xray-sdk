@@ -2,169 +2,188 @@
 
 ## 1. Executive Summary
 
-**XRay** is a specialized observability platform designed for **pipeline-based systems**, such as LLM orchestration chains (RAG apps), data transformation workflows, or multi-step execution jobs.
+XRay is an observability platform specifically engineered for pipeline-based systems. It targets complex workflows such as LLM orchestration chains (RAG applications), data transformation pipelines, and multi-step execution jobs.
 
-Unlike generic APM tools (Datadog, New Relic) which focus on CPU/Memory/Requests, XRay focuses on **execution logic observability**:
+Unlike traditional Application Performance Monitoring (APM) tools that prioritize system-level metrics like CPU usage, memory consumption, or request throughput, XRay centers on **execution logic observability**. It aims to answer questions regarding the logical flow of data:
 
-- What inputs went into this step?
-- Which candidates (e.g., retrieved documents) were considered?
-- Why were certain candidates rejected?
-- What was the reasoning behind the final output?
+- What specific inputs were provided to a processing step?
+- Which candidates (e.g., retrieved documents or generated pathways) were evaluated?
+- What was the reasoning behind rejecting specific candidates?
+- Why was a particular final output selected?
 
-The system is built as a **Monorepo** containing a TypeScript SDK for instrumentation and a centralised API service for data ingestion and storage.
+The system is structured as a Monorepo containing two primary packages: a TypeScript SDK (`@xray-sys/sdk`) for client-side instrumentation and a centralized API service (`@xray-sys/api`) for data ingestion and persistent storage.
 
 ---
-<img width="786" height="601" alt="Screenshot 2026-01-02 at 11 28 59 PM" src="https://github.com/user-attachments/assets/475867c6-f16b-4b16-8ac0-cc6dbf7e0bed" />
 
 ## 2. High-Level System Design
 
-The architecture follows a standard **Producer-Consumer** model, decoupled by an ingestion API.
+The architecture implements a standard **Producer-Consumer** pattern, decoupled by an HTTP ingestion API.
 
-```
-graph LR
-    subgraph "Client Application"
-        UserCode[Your App Code] -->|Instruments| SDK[XRay SDK]
-        SDK -->|Buffers & Batches| Network
-    end
+### System Components
 
-    subgraph "XRay Backend"
-        Network -->|POST /v1/runs, /v1/steps| API[API Service (Express)]
-        API -->|Upsert Transactions| DB[(PostgreSQL)]
-    end
+1.  **Client Application (Producer)**
 
-    subgraph "Data Storage"
-        DB --> Run[Run / Trace]
-        DB --> Step[Steps]
-        DB --> Metric[Metrics & Candidates]
-    end
-```
+    - Integrates the XRay SDK.
+    - Generates traces, steps, and candidate data during execution.
+    - Buffers data locally in memory to minimize performance impact.
 
-### 2.1 Core Components
+2.  **API Service (Consumer)**
 
-1.  **XRay SDK (`@xray-sys/sdk`)**:
+    - Receives batches of telemetry data via HTTP endpoints.
+    - Validates payloads and acts as the write-gateway to the database.
+    - Implements idempotency to handle network retries gracefully.
 
-    - **Role**: Lightweight, non-blocking telemetry emitter.
-    - **Behavior**: It does _not_ send every event immediately. Instead, it pushes events to an internal memory queue. A background timer flushes batches to the API asynchronously to minimize impact on the host application's latency.
-    - **Capture Policy**: Implements client-side data reduction (sampling) to avoid sending massive payloads (e.g., "only keep top 5 and bottom 5 ranked documents").
-
-2.  **API Service (`@xray-sys/api`)**:
-
-    - **Role**: Ingestion endpoint and data query layer.
-    - **Tech Stack**: Node.js, Express, Prisma ORM.
-    - **Design Principle**: Heavy use of **Idempotency**. Since networks are unreliable, the SDK may retry sending the same step data. The API uses `upsert` (Insert on Conflict Update) for almost all write operations to ensure data consistency.
-
-3.  **Database**:
-    - **Role**: Persistent storage for traces and relational data.
-    - **Tech Stack**: PostgreSQL.
-    - **Schema**: Optimized for write-heavy loads with frequent updates to existing rows (e.g., updating a step from "running" to "success").
+3.  **Database (Storage)**
+    - Relational storage (PostgreSQL) optimized for write-heavy workloads.
+    - Stores the structural hierarchy of Runs and Steps, alongside JSON-rich payloads for flexible metadata.
 
 ---
 
 ## 3. Data Model
 
-The data model captures the lifecycle of a "Run".
+The data model is designed to capture the complete lifecycle of a "Run" and its constituent "Steps". The relationships form a hierarchical tree structure where a Run contains multiple Steps, and Steps contain granular data points like Candidates and Metrics.
 
-### 3.1 Main Entities
 
-- **`Run`**: Represents a single execution of a pipeline.
+<img width="786" height="601" alt="Screenshot 2026-01-02 at 11 28 59 PM" src="https://github.com/user-attachments/assets/475867c6-f16b-4b16-8ac0-cc6dbf7e0bed" />
 
-  - Identified by `runId` (UUID) and `traceId` (Logical ID, e.g., Request ID).
-  - Stores global context: `tags`, `meta`, `input`, `output`.
-  - State: `running` -> `success` | `error`.
 
-- **`Step`**: A discrete unit of work within a Run.
+### Entity Relationship Diagram
 
-  - Hierarchical: Can have a `parentStepId`.
-  - Types: e.g., "retrieval", "generation", "filter".
-  - Contains `reasoning` (JSON) to explain _why_ a result was produced.
+The core entities and their relationships are defined as follows:
 
-- **`StepCandidate`**: Items processed during a step.
+- **Run** (1:n) **Step**
+- **Step** (1:n) **StepCandidate**
+- **Step** (1:n) **CandidateOutcome**
+- **Step** (1:1) **StepMetrics**
 
-  - Example: In a RAG pipeline, these are the chunks retrieved from a vector DB.
-  - Attributes: `score`, `rank`, `payload` (content).
+### Entity Details
 
-- **`CandidateOutcome`**: The decision made on a candidate.
+#### Run
 
-  - Outcomes: `accepted`, `rejected`, `selected`.
-  - Includes `reasonCode` and `reasoningText` (e.g., "Rejected because relevance < 0.7").
+Represents a single execution of a pipeline.
 
-- **`StepMetrics`**: Aggregated stats for a step.
-  - `rejectionRate`, `candidatesIn`, `acceptedCount`.
-  - Useful for identifying stages that are too aggressive or too lenient.
+- `id`: Unique UUID for the run.
+- `traceId`: Logical identifier linking the run to a broader system trace (e.g., a request ID).
+- `status`: Lifecycle state (running, success, error).
+- `pipeline`: Name of the pipeline being executed.
+- `tags` / `meta`: Key-value pairs for categorization and arbitrary context.
 
----
+#### Step
 
-## 4. SDK Architecture (Internal)
+A discrete unit of logic within a Run. Steps can be nested, allowing for complex tree-like execution traces.
 
-The SDK is designed to be **unobtrusive**.
+- `id`: Unique UUID for the step.
+- `runId`: Foreign key to the parent Run.
+- `parentStepId`: Optional pointer to a parent step for recursive structures.
+- `type`: Classification of the step (e.g., "retrieval", "generation", "filter").
+- `input` / `output`: The actual data flowing into and out of the step.
+- `reasoning`: A JSON object capturing the "thinking" process or logic used during the step.
 
-```typescript
-// Conceptual Flow
-const client = new XRayClient({ ... }); // 1. Init Queue
-const run = client.startRun(...);       // 2. Gen RunID, Queue 'RunStart'
+#### StepCandidate
 
-// 3. User does work
-run.step("retrieval", (step) => {
-    // 4. Ingest 'Running' state immediately
+Items processed or evaluated during a step. In a RAG context, these would be the chunks retrieved from a vector database.
 
-    step.addCandidates([...]); // 5. Add data to local memory
-    step.reject(id, "low_score");
+- `candidateId`: Identifier for the item.
+- `candidateType`: Classification of the item (e.g., "document", "chunk").
+- `rank`: The ordinal position of the candidate (common in ranked retrieval lists).
+- `score`: Usefulness score (e.g., vector similarity and confidence score).
+- `payload`: The actual content of the candidate.
 
-    // 6. On complete:
-    //    - Calculate Metrics (client-side)
-    //    - Apply Capture Policy (discard excess data)
-    //    - Queue 'StepComplete' payload
-});
-```
+#### CandidateOutcome
 
-### Key Classes
+The decision made regarding a specific candidate.
 
-- **`XRayClient`**:
+- `outcome`: The final status (accepted, rejected, selected).
+- `reasonCode`: A low-cardinality string code for the decision (e.g., "TOO_SHORT", "LOW_SIMILARITY").
+- `reasoningText`: Human-readable explanation for the decision.
 
-  - Manages the `undici` HTTP connection.
-  - Owns the `queue` array.
-  - `flush()`: Splices the queue and sends a batch POST request. Handles retries for network glitches (best-effort).
+#### StepMetrics
 
-- **`XRayStep`**:
-  - Accumulates state (`candidatesIn`, `outcomes`).
-  - **`ingestFinal()`**: The critical method that finalizes the step. It computes derived metrics (like rejection rate) and constructs the final JSON payload for the API.
+Aggregated statistics for a step, computed client-side before ingestion.
+
+- `candidatesIn`: Total number of candidates observed.
+- `candidatesCaptured`: Number of candidates actually sent to the backend (affected by capture policies).
+- `rejectionRate`: The ratio of rejected candidates to total candidates.
+- `acceptedCount`, `rejectedCount`, `selectedCount`: Raw counters.
 
 ---
 
-## 5. Folder Structure
+## 4. Capture Policies
 
-The repository relies on NPM Workspaces.
+To prevent "observability storage explosion," the XRay SDK implements intelligent client-side data reduction known as **Capture Policies**. In high-throughput systems (like search or RAG), a single step might evaluate thousands of candidates. Storing the full payload for every candidate is often unnecessary and cost-prohibitive.
 
-### Root
+The capture policy is applied at the end of a step, just before the final payload is constructed. It determines which candidates strictly remain in the telemetry and which are discarded.
 
-- `package.json`: Orchestrates scripts across workspaces (`dev`, `build`, `test`).
-- `.gitignore`, `README.md`, `ARCHITECTURE.md`.
+### Policy Modes
 
-### `packages/api`
+1.  **THRESHOLD** (Default)
 
-The backend service.
+    - Acts as an adaptive mode.
+    - If the number of candidates is below a defined threshold (default 200), it behaves like `FULL` (keeps everything).
+    - If the number exceeds the threshold, it switches to `TOP_K` to preserve only the most relevant items.
 
-- `prisma/schema.prisma`: The Single Source of Truth for the DB schema.
-- `src/index.ts`: Entry point, server setup.
-- `src/routes.ts`: All HTTP route handlers. Logic is currently centralized here for simplicity.
-- `src/validators.ts`: Zod schemas for runtime request validation.
-- `src/prisma.ts`: Singleton Prisma client instance.
+2.  **TOP_K**
 
-### `packages/sdk`
+    - Preserves only the top `k` candidates associated with the lowest rank values (i.e., Rank 1 is better than Rank 10).
+    - Useful for retrieval tasks where only the top results matter for debugging.
 
-The library consumed by users.
+3.  **SAMPLE**
 
-- `src/index.ts`: Public API exports (`XRay`, `XRayRun`).
-- `src/client.ts`: Internal HTTP transport logic.
-- `src/capture.ts`: Logic for `applyCapturePolicy` (sampling algorithms).
-- `src/context.ts`: `AsyncLocalStorage` helpers for implicit context propagation.
-- `src/types.ts`: Shared TypeScript interfaces.
+    - Performs random reservoir sampling to keep a fixed number of `sampleN` items.
+    - Useful for high-volume data streams where statistical representation is sufficient.
+
+4.  **FULL**
+
+    - Keeps every single candidate and outcome.
+    - Use with caution in production environments.
+
+5.  **SUMMARY_ONLY**
+    - Discards all candidate payloads and outcome details.
+    - Only sends the `StepMetrics` (counts and rates) and the `rejectionHistogram`.
+
+### Histogram Preservation
+
+Crucially, even when candidates are discarded by a policy, the **rejection histogram** is computed over the _entire_ dataset. This means you can still see that 500 items were rejected due to "LOW_SCORE", even if you only stored the payload for the top 5 items. This decouples metric accuracy from storage costs.
 
 ---
 
-## 6. Implementation Principles & Future Considerations
+## 5. Detailed Implementation Design
 
-1.  **Observability-first Database**: The schema is designed to allow SQL queries like "Find all steps where rejection rate > 90%".
-2.  **Transactions**: The API handles step ingestion in a `prisma.$transaction`. This ensures that if we write a step, we also write its metrics and candidates atomically.
-3.  **Future: Authentication**: Currently, the system assumes a trusted environment. API Key auth exists in the SDK code but needs enforcement on the API side.
-4.  **Future: UI**: The next logical component is a React frontend to visualize these traces (Gantt charts, Rejection funnels).
+### SDK Architecture (`@xray-sys/sdk`)
+
+The SDK is designed to be non-blocking and fault-tolerant.
+
+**1. Asynchronous Queuing**
+
+- When a user interacts with the SDK (e.g., `step.end()`), the data is not sent immediately.
+- Instead, the payload is pushed to an in-memory queue within the `XRayClient`.
+- A background flush mechanism (or explicit `flush()` call) processes this queue, batching multiple events into a single HTTP request to reduce network overhead.
+
+**2. Client-Side Computation**
+
+- To reduce load on the API and database, metrics are computed on the client.
+- The `XRayStep.ingestFinal()` method calculates `rejectionRate`, builds the histograms, and filters arrays based on the active Capture Policy. The backend simply stores the pre-computed results.
+
+**3. Implicit Context Propagation**
+
+- The SDK utilizes Node.js `AsyncLocalStorage` to manage `runId` and `traceId` context.
+- This allows deep functions to access the current tracing context without requiring argument drilling through the entire call stack.
+
+### API Architecture (`@xray-sys/api`)
+
+The API serves as the ingestion gateway and is built with Node.js, Express, and Prisma.
+
+**1. Idempotency and Upserts**
+
+- Network unreliability requires the system to handle duplicate data gracefully.
+- The SDK may retry sending a "Step Complete" event if the first attempt times out.
+- The API uses Prisma `upsert` operations. If a step with the given ID already exists, it updates the record; otherwise, it creates a new one. This ensures eventual consistency without duplicate rows.
+
+**2. Atomic Transactions**
+
+- Writing a finished step is a complex operation involving multiple tables (`Step`, `StepMetrics`, `StepCandidate`, `CandidateOutcome`).
+- These writes are wrapped in a `prisma.$transaction`. This ensures ACID compliance: either the entire step data is written successfully, or none of it is, preventing partial states where metrics exist without their corresponding candidates.
+
+**3. Zod Usage**
+
+- All incoming requests are validated against strict Zod schemas sharing definitions with the SDK types. This contract ensures that invalid data is rejected at the edge before it can pollute the database.
